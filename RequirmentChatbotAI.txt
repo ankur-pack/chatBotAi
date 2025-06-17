@@ -1,0 +1,158 @@
+# Oracle Employee Chatbot Project
+# ==================================
+# Technologies: Python (Flask), Oracle DB, Oracle OCI VM
+
+# ---------------------------
+# STEP 1: SETUP & INSTALLATION
+# ---------------------------
+# SSH into your Oracle OCI VM and run:
+# sudo apt update && sudo apt install python3-pip -y
+# pip install flask oracledb
+
+# ---------------------------
+# STEP 2: CREATE ORACLE TABLES
+# ---------------------------
+-- Execute in SQL Developer or SQL*Plus
+CREATE TABLE employee_master (
+    employee_id NUMBER PRIMARY KEY,
+    employee_name VARCHAR2(100),
+    email VARCHAR2(100)
+);
+
+CREATE TABLE employee_leaves (
+    leave_id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    employee_id NUMBER,
+    leave_date DATE,
+    leave_type VARCHAR2(50),
+    status VARCHAR2(20),
+    FOREIGN KEY (employee_id) REFERENCES employee_master(employee_id)
+);
+
+CREATE TABLE leave_balances (
+    employee_id NUMBER,
+    leave_type VARCHAR2(50),
+    balance NUMBER,
+    FOREIGN KEY (employee_id) REFERENCES employee_master(employee_id)
+);
+
+# ---------------------------
+# STEP 3: FLASK APP STRUCTURE
+# ---------------------------
+# Directory Structure:
+# oracle_chatbot/
+# ├── app.py
+# ├── db.py
+# ├── actions.py
+# ├── intents.py
+# └── config.py
+
+# config.py
+DB_CONFIG = {
+    'user': 'your_db_user',
+    'password': 'your_db_password',
+    'dsn': 'localhost/orclpdb1',
+    'min': 1,
+    'max': 5,
+    'increment': 1
+}
+
+# db.py
+import oracledb
+from config import DB_CONFIG
+
+db_pool = oracledb.create_pool(**DB_CONFIG)
+
+def get_connection():
+    return db_pool.acquire()
+
+# intents.py
+import re
+
+def parse_intent(message):
+    message = message.lower()
+    if "leave balance" in message:
+        return "get_balance"
+    elif "apply leave" in message:
+        return "apply_leave"
+    elif "who took leave" in message:
+        return "leave_list"
+    else:
+        return "unknown"
+
+# actions.py
+from db import get_connection
+from datetime import datetime
+
+def get_leave_balance(emp_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT leave_type, balance FROM leave_balances WHERE employee_id = :1", [emp_id])
+    data = cursor.fetchall()
+    cursor.close()
+    return {lt: bal for lt, bal in data}
+
+def apply_leave(emp_id, leave_date, leave_type):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO employee_leaves (employee_id, leave_date, leave_type, status)
+        VALUES (:1, TO_DATE(:2, 'YYYY-MM-DD'), :3, 'Pending')
+    """, [emp_id, leave_date, leave_type])
+    conn.commit()
+    cursor.close()
+    return "Leave applied successfully for {} on {}.".format(leave_type, leave_date)
+
+def who_took_leave_last_month():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT e.employee_name, l.leave_date, l.leave_type
+        FROM employee_leaves l
+        JOIN employee_master e ON l.employee_id = e.employee_id
+        WHERE l.leave_date BETWEEN ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -1) AND TRUNC(SYSDATE, 'MM')
+    """)
+    data = cursor.fetchall()
+    cursor.close()
+    return data
+
+# app.py
+from flask import Flask, request, jsonify
+from intents import parse_intent
+from actions import get_leave_balance, apply_leave, who_took_leave_last_month
+
+app = Flask(__name__)
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    msg = request.json.get("message")
+    emp_id = int(request.json.get("employee_id"))  # should be from auth token in real case
+    intent = parse_intent(msg)
+
+    if intent == "get_balance":
+        balance = get_leave_balance(emp_id)
+        return jsonify({"response": f"Your leave balances: {balance}"})
+    elif intent == "apply_leave":
+        # for demo, using fixed values. ideally parse date and leave_type from msg
+        return jsonify({"response": apply_leave(emp_id, "2025-06-20", "Sick Leave")})
+    elif intent == "leave_list":
+        leaves = who_took_leave_last_month()
+        return jsonify({"response": str(leaves)})
+    else:
+        return jsonify({"response": "Sorry, I didn’t understand that."})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+# ---------------------------
+# STEP 4: RUN & TEST
+# ---------------------------
+# python3 app.py
+# Test via curl or Postman:
+# curl -X POST http://<your-vm-ip>:5000/chat -H "Content-Type: application/json" -d '{"message": "apply leave", "employee_id": 101}'
+
+# ---------------------------
+# STEP 5: OPTIONAL - DEPLOY AS A SERVICE
+# ---------------------------
+# Use gunicorn or deploy via Docker + nginx for production
+# Secure with authentication
+# Add GPT integration (OpenAI API) for dynamic prompt parsing in the future
